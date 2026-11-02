@@ -44,9 +44,19 @@ jobs:
           set +e
           ./scripts/e2e-wireguard-exit-docker.sh > "$RUNNER_TEMP/e2e.log" 2>&1
           rc=$?
-          tail -n 80 "$RUNNER_TEMP/e2e.log"
+          echo "--- failure and local-network lines"
+          grep -nE 'e2e failed|local network|^\+ |unbound variable|command not found|RTNETLINK|Error:' "$RUNNER_TEMP/e2e.log" | head -n 40
+          echo "--- first 60 lines after the mesh checks"
+          grep -n -m1 -A60 'mesh reply route\|bidirectional mesh pings\|local network' "$RUNNER_TEMP/e2e.log" | head -n 60
           echo "e2e exit code: $rc"
           if [ "${{ matrix.variant }}" = after ]; then
             exit "$rc"
           fi
           [ "$rc" -ne 0 ] && grep -q 'captured a local network in the mesh range' "$RUNNER_TEMP/e2e.log"
+      - name: Keep the full e2e log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.variant }}-log
+          path: ${{ runner.temp }}/e2e.log
+          retention-days: 7
