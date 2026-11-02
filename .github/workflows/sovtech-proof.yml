@@ -1,0 +1,52 @@
+name: WG upstream policy rule proof
+
+# Evidence for fix/wg-upstream-rule-iif on hosts with root networking:
+# - netns-proof: the kernel routing behavior of the shipped rule vs the scoped rule.
+# - e2e: the Docker WireGuard exit e2e with its new local-network assertion,
+#   on upstream master (expected to fail at that assertion) and on the fix.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [sovtech/ci-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  netns-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Shipped rule vs scoped rule in a throwaway network namespace
+        run: sudo unshare -n bash .github/sovtech-proof/netns-proof.sh
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [before, after]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/wg-upstream-rule-iif
+          fetch-depth: 0
+      - name: Use upstream master code with the new assertion
+        if: matrix.variant == 'before'
+        run: |
+          git checkout c648b285982b866d8fd7b6aa6da427a06268c446 -- .
+          git checkout origin/fix/wg-upstream-rule-iif -- scripts/e2e-wireguard-exit-docker.sh
+          git status --short
+      - name: Run WireGuard exit e2e
+        run: |
+          set +e
+          ./scripts/e2e-wireguard-exit-docker.sh > "$RUNNER_TEMP/e2e.log" 2>&1
+          rc=$?
+          tail -n 80 "$RUNNER_TEMP/e2e.log"
+          echo "e2e exit code: $rc"
+          if [ "${{ matrix.variant }}" = after ]; then
+            exit "$rc"
+          fi
+          [ "$rc" -ne 0 ] && grep -q 'captured a local network in the mesh range' "$RUNNER_TEMP/e2e.log"
