@@ -9,6 +9,7 @@ name: Upstream PR proofs
 #   exit-node Docker e2e on the fork branch (#175).
 # - android: debug APKs of upstream master and the fork branch, under separate
 #   test package names so they install side by side on a test phone (#158 item 3).
+#   The phone check itself is .github/sovtech-proof/android-overlap.sh (adb).
 
 on:
   workflow_dispatch:
