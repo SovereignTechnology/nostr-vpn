@@ -1,29 +1,33 @@
 name: Upstream PR proofs
 
 # Evidence for SovTech pull requests to mmalmi/nostr-vpn, on runners with root
-# networking. Earlier proofs (WireGuard upstream rule, #160) are in this
-# branch's history.
-# - nat-proof: exit-node NAT with a local network inside the mesh range, shipped
-#   rule vs this change, in throwaway network namespaces.
-# - exit-node-e2e: upstream's private exit-node Docker e2e on the fork branch.
+# networking or the Android SDK. Earlier proofs (WireGuard upstream rule, #160)
+# are in this branch's history. Run on demand only:
+#   gh workflow run sovtech-proof.yml --ref sovtech/ci-proof -f proof=<name> [-f ref=<branch>]
+# - nat: exit-node NAT with a local network inside the mesh range, shipped rule
+#   vs the change, in throwaway network namespaces, plus upstream's private
+#   exit-node Docker e2e on the fork branch (#175).
+# - android: debug APKs of upstream master and the fork branch, under separate
+#   test package names so they install side by side on a test phone (#158 item 3).
 
 on:
   workflow_dispatch:
     inputs:
+      proof:
+        description: Which proof to run
+        type: choice
+        options: [nat, android]
+        default: android
       ref:
         description: Fork branch under test
-        default: fix/exit-nat-mesh-ingress
-  push:
-    branches: [sovtech/ci-proof]
+        default: fix/mobile-mesh-peer-routes
 
 permissions:
   contents: read
 
-env:
-  REF_UNDER_TEST: ${{ inputs.ref || 'fix/exit-nat-mesh-ingress' }}
-
 jobs:
   nat-proof:
+    if: inputs.proof == 'nat'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -33,12 +37,13 @@ jobs:
         run: sudo bash .github/sovtech-proof/nat-proof.sh
 
   exit-node-e2e:
+    if: inputs.proof == 'nat'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.REF_UNDER_TEST }}
+          ref: ${{ inputs.ref }}
       - name: Run the private exit-node e2e
         run: |
           set +e
@@ -57,4 +62,55 @@ jobs:
         with:
           name: exit-node-e2e-log
           path: ${{ runner.temp }}/e2e.log
+          retention-days: 7
+
+  # Same toolchain as upstream's consumer-validation Android job.
+  android-apk:
+    if: inputs.proof == 'android'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: before
+            ref: master
+          - variant: after
+            ref: ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref || inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-linux-android
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+      - name: Install Android Rust build tools
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;28.2.13676358'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Build the debug app under a test package name
+        shell: bash
+        env:
+          NVPN_ANDROID_PACKAGE: org.sovtech.nvpntest.${{ matrix.variant }}
+        run: |
+          git log -1 --format='building %H %s'
+          tools/run-android build --no-daemon --max-workers=2
+          mkdir -p "$RUNNER_TEMP/apk"
+          apk=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n 1)
+          cp "$apk" "$RUNNER_TEMP/apk/nvpntest-${{ matrix.variant }}.apk"
+          git rev-parse HEAD > "$RUNNER_TEMP/apk/nvpntest-${{ matrix.variant }}.commit"
+          sha256sum "$RUNNER_TEMP/apk/"*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvpntest-${{ matrix.variant }}
+          path: ${{ runner.temp }}/apk
           retention-days: 7
