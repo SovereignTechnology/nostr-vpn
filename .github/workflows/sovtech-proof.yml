@@ -4,9 +4,10 @@ name: Upstream PR proofs
 # networking or the Android SDK. Earlier proofs (WireGuard upstream rule, #160)
 # are in this branch's history. Run on demand only:
 #   gh workflow run sovtech-proof.yml --ref sovtech/ci-proof -f proof=<name> [-f ref=<branch>]
-# - nat: exit-node NAT with a local network inside the mesh range, shipped rule
-#   vs the change, in throwaway network namespaces, plus upstream's private
-#   exit-node Docker e2e on the fork branch (#175).
+# - nat: the fork branch's isolated-namespace exit NAT regression, run through
+#   scripts/test-linux-egress-lifecycle, plus upstream's private exit-node
+#   Docker e2e on the same branch (#175). .github/sovtech-proof/nat-proof.sh is
+#   the earlier proof of the shipped rule and is no longer run.
 # - android: debug APKs of upstream master and the fork branch, under separate
 #   test package names so they install side by side on a test phone (#158 item 3).
 #   The phone check itself is .github/sovtech-proof/android-overlap.sh (adb).
@@ -27,15 +28,34 @@ permissions:
   contents: read
 
 jobs:
-  nat-proof:
+  # The branch's own isolated-namespace regression, through the repo's runner.
+  nat-namespace-test:
     if: inputs.proof == 'nat'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-      - name: Install conntrack
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq conntrack
-      - name: Shipped rule vs this change in throwaway network namespaces
-        run: sudo bash .github/sovtech-proof/nat-proof.sh
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - name: Install build and namespace test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libdbus-1-dev libclang-dev clang libnftnl-dev libmnl-dev pkg-config nftables iptables python3
+      - name: Build the test executable and nvpn
+        run: |
+          git log -1 --format='testing %H %s'
+          cargo build --locked -p nvpn
+          cargo test --locked -p nvpn --no-run 2>&1 | tee "$RUNNER_TEMP/no-run.log"
+          exe=$(grep -oE 'unittests src/main.rs \(target/debug/deps/nvpn-[0-9a-f]+\)' "$RUNNER_TEMP/no-run.log" | grep -oE 'target/debug/deps/nvpn-[0-9a-f]+')
+          echo "NVPN_TEST_EXE=$exe" >> "$GITHUB_ENV"
+      - name: Exit NAT regression in an isolated root namespace
+        run: |
+          nft --version; iptables --version
+          scripts/test-linux-egress-lifecycle "$NVPN_TEST_EXE" target/debug/nvpn \
+            platform_routing::linux_exit_nat_tests::exit_nat_masquerades_only_traffic_from_the_mesh_interface
 
   exit-node-e2e:
     if: inputs.proof == 'nat'
