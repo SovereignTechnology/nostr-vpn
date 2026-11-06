@@ -214,8 +214,29 @@ jobs:
           sudo "$NVPN" set --config "$A" --listen-port 51831 --advertise-exit-node true >/dev/null
           sudo "$NVPN" set --config "$B" --listen-port 51832 >/dev/null
           sudo "$NVPN" start --config "$A" --iface nvpna --daemon --connect
-          sudo "$NVPN" start --config "$B" --iface nvpnb --daemon --connect
-          sleep 5
+          # One daemon per network namespace: B gets its own, NATed to the uplink,
+          # like scripts/desktop-linux-underlay-peer-e2e.sh.
+          UPLINK=$(ip -4 -o route get 1.1.1.1 | grep -oP 'dev \K\S+')
+          sudo ip netns add peerb
+          sudo ip link add vethb type veth peer name vethb0 netns peerb
+          sudo ip addr add 192.168.77.1/24 dev vethb
+          sudo ip link set vethb up
+          sudo ip -n peerb addr add 192.168.77.2/24 dev vethb0
+          sudo ip -n peerb link set vethb0 up
+          sudo ip -n peerb link set lo up
+          sudo ip -n peerb route add default via 192.168.77.1
+          sudo sysctl -qw net.ipv4.ip_forward=1
+          sudo iptables -t nat -A POSTROUTING -s 192.168.77.0/24 -o "$UPLINK" -j MASQUERADE
+          sudo iptables -I FORWARD 1 -i vethb -j ACCEPT
+          sudo iptables -I FORWARD 1 -o vethb -j ACCEPT
+          sudo mkdir -p /etc/netns/peerb
+          echo 'nameserver 1.1.1.1' | sudo tee /etc/netns/peerb/resolv.conf >/dev/null
+          sudo install -d -m 0700 /run/nvpn-peerb
+          sudo ip netns exec peerb nohup env RUST_LOG=info "$NVPN" daemon --config "$B" --iface nvpnb \
+            --daemon-instance peerb >/tmp/nvpn-b/daemon.log 2>&1 </dev/null &
+          sleep 8
+          sudo ip -n peerb -4 -br addr show
+          sudo tail -n 5 /tmp/nvpn-b/daemon.log
           A_IP=$(sudo "$NVPN" status --config "$A" --json | json '["tunnel_ip"]')
           B_IP=$(sudo "$NVPN" status --config "$B" --json | json '["tunnel_ip"]')
           HOST_IP=$(ip -4 -o route get 1.1.1.1 | grep -oP 'src \K[0-9.]+')
@@ -268,5 +289,6 @@ jobs:
           print(s.get("device_id"), s.get("tunnel_ip"))
           for p in s.get("peers") or []:
               print("  peer", p.get("participant_pubkey", "")[:12], p.get("tunnel_ip"), "recv", p.get("fips_packets_recv"), "sent", p.get("fips_packets_sent"))' || true; done
-          sudo "$NVPN" stop --config "$B" || true
+          sudo tail -n 20 /tmp/nvpn-b/daemon.log || true
+          sudo ip netns pids peerb | xargs -r sudo kill || true
           sudo "$NVPN" stop --config "$A" || true
