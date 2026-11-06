@@ -232,8 +232,9 @@ jobs:
           sudo mkdir -p /etc/netns/peerb
           echo 'nameserver 1.1.1.1' | sudo tee /etc/netns/peerb/resolv.conf >/dev/null
           sudo install -d -m 0700 /run/nvpn-peerb
-          sudo ip netns exec peerb nohup env RUST_LOG=info "$NVPN" daemon --config "$B" --iface nvpnb \
-            --daemon-instance peerb >/tmp/nvpn-b/daemon.log 2>&1 </dev/null &
+          # The redirect must happen as root: /tmp/nvpn-b belongs to root.
+          sudo sh -c 'exec ip netns exec peerb env RUST_LOG=info "$0" daemon --config "$1" --iface nvpnb \
+            --daemon-instance peerb >/tmp/nvpn-b/daemon.log 2>&1 </dev/null' "$NVPN" "$B" &
           sleep 8
           sudo ip -n peerb -4 -br addr show
           sudo tail -n 5 /tmp/nvpn-b/daemon.log
