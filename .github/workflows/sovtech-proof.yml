@@ -149,7 +149,7 @@ jobs:
 
   ios-build:
     if: inputs.proof == 'ios'
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -204,7 +204,8 @@ jobs:
         run: |
           json() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
           sudo mkdir -p /tmp/nvpn-a /tmp/nvpn-b
-          sudo "$NVPN" init --config "$A" --force >/dev/null
+          # The admin's network starts with the phone, so it has a network id.
+          sudo "$NVPN" init --config "$A" --force --device "$PHONE_ID" >/dev/null
           sudo "$NVPN" init --config "$B" --force >/dev/null
           A_STATUS=$(sudo "$NVPN" status --config "$A" --json)
           A_ID=$(json '["device_id"]' <<<"$A_STATUS")
@@ -212,7 +213,6 @@ jobs:
           B_ID=$(sudo "$NVPN" join-manual --admin-device-id "$A_ID" --network-id "$NETWORK_ID" --config "$B" --json | json '["device_id"]')
           sudo "$NVPN" set --config "$A" --listen-port 51831 --advertise-exit-node true >/dev/null
           sudo "$NVPN" set --config "$B" --listen-port 51832 >/dev/null
-          sudo "$NVPN" add-device --config "$A" --device "$PHONE_ID" >/dev/null
           sudo "$NVPN" start --config "$A" --iface nvpna --daemon --connect
           sudo "$NVPN" start --config "$B" --iface nvpnb --daemon --connect
           sleep 5
