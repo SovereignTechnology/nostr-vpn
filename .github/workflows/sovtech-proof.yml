@@ -11,6 +11,9 @@ name: Upstream PR proofs
 # - android: debug APKs of upstream master and the fork branch, under separate
 #   test package names so they install side by side on a test phone (#158 item 3).
 #   The phone check itself is .github/sovtech-proof/android-overlap.sh (adb).
+# - ios: upstream's iOS device and simulator build of the fork branch, the
+#   same steps as its consumer-validation workflow, to compile-check changes
+#   to the packet tunnel provider (no paid Apple account here to run them).
 
 on:
   workflow_dispatch:
@@ -18,7 +21,7 @@ on:
       proof:
         description: Which proof to run
         type: choice
-        options: [nat, android]
+        options: [nat, android, ios]
         default: android
       ref:
         description: Fork branch under test
@@ -134,4 +137,34 @@ jobs:
         with:
           name: nvpntest-${{ matrix.variant }}
           path: ${{ runner.temp }}/apk
+          retention-days: 7
+
+  ios-build:
+    if: inputs.proof == 'ios'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Prepare iOS build tools
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcrun simctl list devices available --json | python3 -c \
+            'import json,sys; print("NVPN_IOS_SIMULATOR_NAME=" + next(d["name"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))' >> "$GITHUB_ENV"
+      - name: Build iOS device and simulator app
+        shell: bash
+        run: |
+          git log -1 --format='building %H %s'
+          mkdir -p validation
+          tools/run-ios build 2>&1 | tee validation/ios.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-build-log
+          path: validation
           retention-days: 7
