@@ -204,8 +204,15 @@ jobs:
         run: |
           json() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
           sudo mkdir -p /tmp/nvpn-a /tmp/nvpn-b
-          # The admin's network starts with the phone, so it has a network id.
-          sudo "$NVPN" init --config "$A" --force --device "$PHONE_ID" >/dev/null
+          # Like scripts/e2e-manual-join-cli.sh: a throwaway seed device gives
+          # the admin's network an id; add-device then queues the signed join
+          # roster that a manually joining phone needs; the seed is removed.
+          sudo mkdir -p /tmp/nvpn-seed
+          sudo "$NVPN" init --config /tmp/nvpn-seed/config.toml --force >/dev/null
+          SEED_ID=$(sudo "$NVPN" status --config /tmp/nvpn-seed/config.toml --json | json '["device_id"]')
+          sudo "$NVPN" init --config "$A" --force --device "$SEED_ID" >/dev/null
+          sudo "$NVPN" add-device --config "$A" --device "$PHONE_ID" >/dev/null
+          sudo "$NVPN" remove-device --config "$A" --device "$SEED_ID" >/dev/null
           sudo "$NVPN" init --config "$B" --force >/dev/null
           A_STATUS=$(sudo "$NVPN" status --config "$A" --json)
           A_ID=$(json '["device_id"]' <<<"$A_STATUS")
