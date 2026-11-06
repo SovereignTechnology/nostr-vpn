@@ -243,7 +243,14 @@ jobs:
           HOST_IP=$(ip -4 -o route get 1.1.1.1 | grep -oP 'src \K[0-9.]+')
           ip -4 -br addr show
           echo "B_ID=$B_ID" >> "$GITHUB_ENV"
-          echo "::notice title=READY::network_id=$NETWORK_ID admin=$A_ID b=$B_ID a_ip=$A_IP b_ip=$B_IP host_ip=$HOST_IP"
+          echo "network_id=$NETWORK_ID admin=$A_ID b=$B_ID a_ip=$A_IP b_ip=$B_IP host_ip=$HOST_IP" | tee "$RUNNER_TEMP/ready.txt"
+      # Notices only reach the API when the job ends; an artifact is readable
+      # as soon as this step finishes, so the adb driver can join the phone.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ready
+          path: ${{ runner.temp }}/ready.txt
+          retention-days: 1
       - name: Wait for the phone
         run: |
           deadline=$(( $(date +%s) + 1500 ))
