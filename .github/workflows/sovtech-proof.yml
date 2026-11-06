@@ -224,6 +224,9 @@ jobs:
           sudo "$NVPN" set --config "$B" --listen-port 51832 >/dev/null
           C_ID=$(sudo "$NVPN" join-manual --admin-device-id "$A_ID" --network-id "$NETWORK_ID" --config /tmp/nvpn-c/config.toml --json | json '["device_id"]')
           sudo "$NVPN" set --config /tmp/nvpn-c/config.toml --listen-port 51833 >/dev/null
+          # The runner's FORWARD policy is DROP (Docker); let A forward as an exit.
+          sudo iptables -I FORWARD 1 -i nvpna -j ACCEPT
+          sudo iptables -I FORWARD 1 -o nvpna -j ACCEPT
           sudo "$NVPN" start --config "$A" --iface nvpna --daemon --connect
           # One daemon per network namespace: B gets its own, NATed to the uplink,
           # like scripts/desktop-linux-underlay-peer-e2e.sh.
@@ -307,6 +310,8 @@ jobs:
         run: |
           sleep 90
           sudo iptables -t nat -L POSTROUTING -v -n || true
+          sudo iptables -L FORWARD -v -n | head -8 || true
+          sudo tail -n 30 /tmp/nvpn-a/daemon.log || true
           for c in "$A" "$B" /tmp/nvpn-c/config.toml; do sudo "$NVPN" status --config "$c" --json | python3 -c '
           import json, sys
           s = json.load(sys.stdin)
