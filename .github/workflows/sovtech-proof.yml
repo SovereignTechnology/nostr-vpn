@@ -11,11 +11,6 @@ name: Upstream PR proofs
 # - android: debug APKs of upstream master and the fork branch, under separate
 #   test package names so they install side by side on a test phone (#158 item 3).
 #   The phone check itself is .github/sovtech-proof/android-overlap.sh (adb).
-# - android-peers: two nvpn CLI peers for the phone side of the mobile route
-#   refresh check (#182). A is the admin and exit node and pre-adds the phone
-#   (input `phone`); B is added and removed on a fixed timeline. Each phase is
-#   its own step with a notice annotation, so the adb driver can follow the run
-#   live through the jobs and annotations API.
 # - ios: upstream's iOS device and simulator build of the fork branch, the
 #   same steps as its consumer-validation workflow, to compile-check changes
 #   to the packet tunnel provider (no paid Apple account here to run them).
@@ -26,14 +21,11 @@ on:
       proof:
         description: Which proof to run
         type: choice
-        options: [nat, android, android-peers, ios]
+        options: [nat, android, ios]
         default: android
       ref:
         description: Fork branch under test
         default: fix/mobile-mesh-peer-routes
-      phone:
-        description: Phone device id (npub) to pre-add to the test network (android-peers)
-        default: ''
 
 permissions:
   contents: read
@@ -176,148 +168,3 @@ jobs:
           name: ios-build-log
           path: validation
           retention-days: 7
-
-  android-peers:
-    if: inputs.proof == 'android-peers'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    env:
-      PHONE_ID: ${{ inputs.phone }}
-      NVPN: ${{ github.workspace }}/target/debug/nvpn
-      A: /tmp/nvpn-a/config.toml
-      B: /tmp/nvpn-b/config.toml
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.95.0
-      - name: Build nvpn
-        run: |
-          [[ "$PHONE_ID" =~ ^npub1[02-9ac-hj-np-z]{58}$ ]] || { echo "phone must be an npub" >&2; exit 2; }
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libdbus-1-dev libclang-dev clang libnftnl-dev libmnl-dev pkg-config nftables iptables python3
-          git log -1 --format='building %H %s'
-          cargo build --locked -p nvpn --bin nvpn
-      - name: Start the peers
-        run: |
-          json() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
-          sudo mkdir -p /tmp/nvpn-a /tmp/nvpn-b
-          # Like scripts/e2e-manual-join-cli.sh: a throwaway seed device gives
-          # the admin's network an id; add-device then queues the signed join
-          # roster that a manually joining phone needs; the seed is removed.
-          sudo mkdir -p /tmp/nvpn-seed
-          sudo "$NVPN" init --config /tmp/nvpn-seed/config.toml --force >/dev/null
-          SEED_ID=$(sudo "$NVPN" status --config /tmp/nvpn-seed/config.toml --json | json '["device_id"]')
-          sudo "$NVPN" init --config "$A" --force --device "$SEED_ID" >/dev/null
-          sudo "$NVPN" add-device --config "$A" --device "$PHONE_ID" >/dev/null
-          sudo "$NVPN" remove-device --config "$A" --device "$SEED_ID" >/dev/null
-          sudo "$NVPN" init --config "$B" --force >/dev/null
-          sudo mkdir -p /tmp/nvpn-c
-          sudo "$NVPN" init --config /tmp/nvpn-c/config.toml --force >/dev/null
-          A_STATUS=$(sudo "$NVPN" status --config "$A" --json)
-          A_ID=$(json '["device_id"]' <<<"$A_STATUS")
-          NETWORK_ID=$(json '["network_id"]' <<<"$A_STATUS")
-          B_ID=$(sudo "$NVPN" join-manual --admin-device-id "$A_ID" --network-id "$NETWORK_ID" --config "$B" --json | json '["device_id"]')
-          sudo "$NVPN" set --config "$A" --listen-port 51831 --advertise-exit-node true >/dev/null
-          sudo "$NVPN" set --config "$B" --listen-port 51832 >/dev/null
-          C_ID=$(sudo "$NVPN" join-manual --admin-device-id "$A_ID" --network-id "$NETWORK_ID" --config /tmp/nvpn-c/config.toml --json | json '["device_id"]')
-          sudo "$NVPN" set --config /tmp/nvpn-c/config.toml --listen-port 51833 >/dev/null
-          # The runner's FORWARD policy is DROP (Docker); let A forward as an exit.
-          sudo iptables -I FORWARD 1 -i nvpna -j ACCEPT
-          sudo iptables -I FORWARD 1 -o nvpna -j ACCEPT
-          sudo "$NVPN" start --config "$A" --iface nvpna --daemon --connect
-          # One daemon per network namespace: B gets its own, NATed to the uplink,
-          # like scripts/desktop-linux-underlay-peer-e2e.sh.
-          UPLINK=$(ip -4 -o route get 1.1.1.1 | grep -oP 'dev \K\S+')
-          sudo sysctl -qw net.ipv4.ip_forward=1
-          peer_netns() { # name, subnet octet, config, iface
-            sudo ip netns add "$1"
-            sudo ip link add "v$1" type veth peer name "v${1}0" netns "$1"
-            sudo ip addr add "192.168.$2.1/24" dev "v$1"
-            sudo ip link set "v$1" up
-            sudo ip -n "$1" addr add "192.168.$2.2/24" dev "v${1}0"
-            sudo ip -n "$1" link set "v${1}0" up
-            sudo ip -n "$1" link set lo up
-            sudo ip -n "$1" route add default via "192.168.$2.1"
-            sudo iptables -t nat -A POSTROUTING -s "192.168.$2.0/24" -o "$UPLINK" -j MASQUERADE
-            sudo iptables -I FORWARD 1 -i "v$1" -j ACCEPT
-            sudo iptables -I FORWARD 1 -o "v$1" -j ACCEPT
-            sudo mkdir -p "/etc/netns/$1"
-            echo 'nameserver 1.1.1.1' | sudo tee "/etc/netns/$1/resolv.conf" >/dev/null
-            sudo install -d -m 0700 "/run/nvpn-$1"
-            # The redirect must happen as root: the state directory belongs to root.
-            sudo sh -c 'exec ip netns exec "$2" env RUST_LOG=info "$0" daemon --config "$1" --iface "$3" \
-              --daemon-instance "$2" >"$(dirname "$1")/daemon.log" 2>&1 </dev/null' "$NVPN" "$3" "$1" "$4" &
-          }
-          peer_netns peerb 77 "$B" nvpnb
-          peer_netns peerc 78 /tmp/nvpn-c/config.toml nvpnc
-          sleep 8
-          sudo tail -n 3 /tmp/nvpn-b/daemon.log /tmp/nvpn-c/daemon.log
-          A_IP=$(sudo "$NVPN" status --config "$A" --json | json '["tunnel_ip"]')
-          B_IP=$(sudo "$NVPN" status --config "$B" --json | json '["tunnel_ip"]')
-          C_IP=$(sudo "$NVPN" status --config /tmp/nvpn-c/config.toml --json | json '["tunnel_ip"]')
-          HOST_IP=$(ip -4 -o route get 1.1.1.1 | grep -oP 'src \K[0-9.]+')
-          ip -4 -br addr show
-          echo "B_ID=$B_ID" >> "$GITHUB_ENV"
-          echo "C_ID=$C_ID" >> "$GITHUB_ENV"
-          echo "network_id=$NETWORK_ID admin=$A_ID b=$B_ID c=$C_ID a_ip=$A_IP b_ip=$B_IP c_ip=$C_IP host_ip=$HOST_IP" | tee "$RUNNER_TEMP/ready.txt"
-      # Notices only reach the API when the job ends; an artifact is readable
-      # as soon as this step finishes, so the adb driver can join the phone.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ready
-          path: ${{ runner.temp }}/ready.txt
-          retention-days: 1
-      - name: Wait for the phone
-        run: |
-          deadline=$(( $(date +%s) + 1500 ))
-          until sudo "$NVPN" status --config "$A" --json | python3 -c '
-          import json, os, sys
-          phone = os.environ["PHONE_ID"].lower()
-          for peer in json.load(sys.stdin).get("peers") or []:
-              ids = {str(peer.get(k, "")).lower() for k in ("participant_pubkey", "npub", "device_id", "fips_endpoint_npub")}
-              if phone in ids and (peer.get("reachable") or (peer.get("fips_packets_recv") or 0) > 0):
-                  sys.exit(0)
-          sys.exit(1)'; do
-            [ "$(date +%s)" -lt "$deadline" ] || { sudo "$NVPN" status --config "$A" --json | head -c 6000; exit 1; }
-            sleep 5
-          done
-          echo "::notice title=PHONE_CONNECTED::$(date -u +%s)"
-      - name: Add B (no exit)
-        run: |
-          sleep 150
-          sudo "$NVPN" add-device --config "$A" --device "$B_ID" >/dev/null
-          echo "::notice title=ADDED_1::$(date -u +%s)"
-      - name: Remove B (no exit)
-        run: |
-          sleep 180
-          sudo "$NVPN" remove-device --config "$A" --device "$B_ID" >/dev/null
-          echo "::notice title=REMOVED_1::$(date -u +%s)"
-      - name: Add C (exit selected)
-        run: |
-          sleep 240
-          sudo "$NVPN" add-device --config "$A" --device "$C_ID" >/dev/null
-          echo "::notice title=ADDED_2::$(date -u +%s)"
-      - name: Remove C (exit selected)
-        run: |
-          sleep 180
-          sudo "$NVPN" remove-device --config "$A" --device "$C_ID" >/dev/null
-          echo "::notice title=REMOVED_2::$(date -u +%s)"
-      - name: Report
-        if: always()
-        run: |
-          sleep 90
-          sudo iptables -t nat -L POSTROUTING -v -n || true
-          sudo iptables -L FORWARD -v -n | head -8 || true
-          sudo tail -n 30 /tmp/nvpn-a/daemon.log || true
-          for c in "$A" "$B" /tmp/nvpn-c/config.toml; do sudo "$NVPN" status --config "$c" --json | python3 -c '
-          import json, sys
-          s = json.load(sys.stdin)
-          print(s.get("device_id"), s.get("tunnel_ip"))
-          for p in s.get("peers") or []:
-              print("  peer", p.get("participant_pubkey", "")[:12], p.get("tunnel_ip"), "recv", p.get("fips_packets_recv"), "sent", p.get("fips_packets_sent"))' || true; done
-          sudo tail -n 20 /tmp/nvpn-b/daemon.log /tmp/nvpn-c/daemon.log || true
-          for ns in peerb peerc; do sudo ip netns pids "$ns" | xargs -r sudo kill || true; done
-          sudo "$NVPN" stop --config "$A" || true
